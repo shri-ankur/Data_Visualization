@@ -1,0 +1,238 @@
+---
+title: "UG-Analysis-Additional"
+author: "Ankur Shrivastava"
+date: "15 June 2018"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r bl1, echo=TRUE}
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(sqldf)
+library(tidyr)
+library(Rcpp)
+library(readxl)
+library(stringr)
+library(graphics)
+library(forecast)
+library(tseries)
+library(GGally)
+ug_india <- read_excel("6107 UG Data- TEST.xlsx",3)
+str(ug_india)
+
+#-----Data cleaning and Preparation-------------------------------
+
+categorize <- function(input_str)
+{
+  if(str_detect(input_str, "BOYS") | str_detect(input_str, "BOY.S") | str_detect(input_str, "B.OYS"))
+  {
+    return("BOYS")
+  }
+  else if(str_detect(input_str, "MENS") | str_detect(input_str, "MEN.S") | str_detect(input_str, "M.ENS") |
+          str_detect(input_str, "GENTS"))
+  {
+    return("MEN")
+  }
+  else if(str_detect(input_str, "GIRLS") | str_detect(input_str, "GIRL.S") | str_detect(input_str, "G.IRLS"))
+  {
+    return("GIRLS")
+  }
+  else if(str_detect(input_str, "WOMENS") | str_detect(input_str, "WOMEN.S") | str_detect(input_str, "WOM.ENS") |
+          str_detect(input_str, "LADIES"))
+  {
+    return("WOMEN")
+  }
+  else
+  {
+    return("unknown")
+  }
+}
+
+ug_india$category <- lapply(ug_india$`Product Description`, categorize)
+
+ug_india$category <- unlist(ug_india$category)
+
+#Following variables should be converted to factors
+factors_india <- c("HS Code", "Unit", "Unit Rate FC", "category", "Exporter Name", "Importer Name")
+
+ug_india[,factors_india] <- lapply(ug_india[,factors_india], as.factor)
+
+#Select only Pratibha's records
+
+ug_pratibha <- ug_india %>% filter(`Exporter Name` == "PRATIBHA SYNTEX LTD") %>%
+               arrange(`SB Date`)
+
+ug_pratibha_monthly <- ug_pratibha %>% mutate(sb_year = year(`SB Date`), sb_month =  month(`SB Date`)) %>%
+                       group_by(sb_year, sb_month) %>% 
+                       summarise(monthly_qty = sum(QTY),
+                                 monthly_sales = sum(`F.O.B Value INR`))
+
+#Function for assigning serial numbers to months
+serialMonths <- function(x){ 
+  i= 1
+  for (i in 1:length(x)){
+    x[i] = i
+    i = i + 1
+  }
+  return(x)
+}
+
+ug_pratibha_monthly$month_no <- serialMonths(ug_pratibha_monthly$sb_month)
+
+#---------------Data Vizualization ------------------------------------------
+#Creating and visualizing time series for the 2 data sets
+
+pratibha_qty_ts <- ts(ug_pratibha_monthly$monthly_qty, start = c(2016, 10), frequency = 12)
+
+### Time Series for qunatity
+
+plot.ts(pratibha_qty_ts, main = "Pratibha, Quantity", xlab = "Year", ylab = "Quantity")
+
+###Identifying trend in quantity 
+
+abline(reg = lm(pratibha_qty_ts ~ time(pratibha_qty_ts)))
+
+###Seasonal effect
+
+boxplot(pratibha_qty_ts ~ cycle(pratibha_qty_ts), main = "Pratibha, Quantity",
+        xlab = "Month", ylab = "Quantity", col = "yellow")
+
+###A seasonal effect can be seen as quantity increases during months of ###July, Oct and Dec and 
+###also during Feb while they dip in March, June and November.
+
+#--------------------Sales-----------------------------------
+pratibha_sales_ts <- ts(ug_pratibha_monthly$monthly_sales, start = c(2016, 10), frequency = 12)
+
+plot.ts(pratibha_sales_ts, main = "Pratibha, Sales", xlab = "Year", ylab = "Sales")
+
+#Identifying trend in sales 
+abline(reg = lm(pratibha_sales_ts ~ time(pratibha_sales_ts)))
+
+#Seasonal effect
+boxplot(pratibha_sales_ts ~ cycle(pratibha_sales_ts), main = "Pratibha, Sales",
+        xlab = "Month", ylab = "Sales", col = "green")
+
+#Same seasonal effect can be seen as sales increase during months of July, Oct and Dec and 
+#also during Feb while they dip in March, June and November.
+
+#################### Model Building and Evaluation ##########################
+#--------------------Quantity--------------------------------------------
+#Creating the model using first 13 rows and the remaining 6 rows will be
+#used for testing the model.
+
+indata_pratibha_qty <- ug_pratibha_monthly[1:13,]
+
+indata_pratibha_qty_ts <- ts(indata_pratibha_qty$monthly_qty, start = c(2016,10), frequency = 12)
+
+plot.ts(indata_pratibha_qty_ts)
+
+# function for smoothing time series
+smoothing_ma <- function(timeser, Window){
+  w <- Window
+  smoothedseries <- stats::filter(timeser, 
+                                  filter=rep(1/(2*w+1),(2*w+1)), 
+                                  method='convolution', sides=2)
+  
+  #Smoothing left end of the time series
+  
+  diff <- smoothedseries[w+2] - smoothedseries[w+1]
+  for (i in seq(w,1,-1)) {
+    smoothedseries[i] <- smoothedseries[i+1] - diff
+  }
+  
+  #Smoothing right end of the time series
+  
+  n <- length(timeser)
+  diff <- smoothedseries[n-w] - smoothedseries[n-w-1]
+  for (i in seq(n-w+1, n)) {
+    smoothedseries[i] <- smoothedseries[i-1] + diff
+  }
+  
+  return(smoothedseries)
+}
+
+#Smoothing the series - Moving Average Smoothing
+smoothed_pratibha_qty <- smoothing_ma(indata_pratibha_qty_ts, 1)
+
+lines(smoothed_pratibha_qty, col="blue", lwd=2)
+
+timevals_in <- indata_pratibha_qty$month_no
+
+smth_pratibha_qty_df <- as.data.frame(cbind(timevals_in, as.vector(smoothed_pratibha_qty)))
+colnames(smth_pratibha_qty_df) <- c('Month', 'Quantity')
+
+#Original model shows constant amplitude of peaks and troughs along with
+#decreasing trend.So, we will try to fit an additive model with trend
+#and seasonality.
+
+lmfit_pratibha_qty <- lm(Quantity ~ sin(0.25*Month) + poly(Month, 1),  data=smth_pratibha_qty_df)
+global_pred_pratibha_qty <- predict(lmfit_pratibha_qty, Month=timevals_in)
+summary(global_pred_pratibha_qty)
+
+global_pred_pratibha_qty_ts <- ts(global_pred_pratibha_qty, start = c(2016,10), frequency = 12)
+
+lines(global_pred_pratibha_qty_ts, col='red', lwd=2)
+
+#Locally predictable part as ARMA series
+local_pred_pratibha_qty_ts <- indata_pratibha_qty_ts - global_pred_pratibha_qty_ts
+plot(local_pred_pratibha_qty_ts, col='red', type = "l")
+acf(local_pred_pratibha_qty_ts, lag.max = 20)
+acf(local_pred_pratibha_qty_ts, type="partial", lag.max = 20)
+pratibha_qty_armafit <- auto.arima(local_pred_pratibha_qty_ts)
+
+tsdiag(pratibha_qty_armafit)
+pratibha_qty_armafit
+
+#ARIMA(0,0,0) with zero mean indicates there is no locally predictable part in
+#time series and it is just white noise
+
+#We'll check if the residual series is white noise
+
+pratibha_qty_resid <- local_pred_pratibha_qty_ts
+
+#Conducting stationarity tests for noise
+adf.test(pratibha_qty_resid,alternative = "stationary")
+kpss.test(pratibha_qty_resid)
+Box.test(pratibha_qty_resid, lag = 12, type = "Ljung-Box")
+#Since All 3 tests indicate stationarity, we can take the 
+#residual series as noise
+
+#Evaluating the model using MAPE
+#Make a prediction for the last 6 months
+
+outdata_pratibha_qty <- as.data.frame(ug_pratibha_monthly[14:19,])
+timevals_out <- outdata_pratibha_qty$month_no
+
+global_pred_outdata_pratibha_qty <- predict(lmfit_pratibha_qty,data.frame(Month =timevals_out))
+
+pratibha_qty_fcast <- global_pred_outdata_pratibha_qty
+
+#Now, let's compare our prediction with the actual values, using MAPE
+
+pratibha_qty_MAPE_classic <- accuracy(pratibha_qty_fcast, outdata_pratibha_qty[,3])[5]
+pratibha_qty_MAPE_classic
+
+#Let's also plot the predictions along with original values, to
+#get a visual feel of the fit
+
+pratibha_qty_pred <- ts(c(global_pred_pratibha_qty, pratibha_qty_fcast), start = c(2016,10), frequency = 12)
+
+plot(pratibha_qty_ts, col = "black", main = "Pratibha, Quantity",
+     xlab = "Year", ylab = "Quantity")
+lines(pratibha_qty_pred, col = "red")
+
+#Forecast using Classical Decomposition model
+pratibha_qty_forecast <- forecast(pratibha_qty_pred, h = 6, lambda = 0)
+
+pratibha_qty_forecast
+
+plot(pratibha_qty_forecast, main = "Pratibha, Quantity Forecast",
+     xlab = "Year", ylab = "Quantity")
+```
